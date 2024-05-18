@@ -5,6 +5,7 @@ const { pki, md } = Forge;
 import mkdirp from "mkdirp";
 import async from "async";
 import ErrnoException = NodeJS.ErrnoException;
+import { CACert, ErrorCallback } from "./types";
 
 const CAattrs = [
   {
@@ -128,142 +129,160 @@ const ServerExtensions = [
   },
 ] as any[];
 
+interface CertFolders {
+  baseFolder: string;
+  certsFolder: string;
+  keysFolder: string;
+}
+
+export function getCertFolders(baseCAFolder: string): CertFolders {
+  return {
+    baseFolder: baseCAFolder,
+    certsFolder: path.join(baseCAFolder, "certs"),
+    keysFolder: path.join(baseCAFolder, "keys"),
+  };
+}
+
+function randomSerialNumber() {
+  // generate random 16 bytes hex string
+  let sn = "";
+  for (let i = 0; i < 4; i++) {
+    sn += `00000000${Math.floor(Math.random() * 256 ** 4).toString(16)}`.slice(
+      -8
+    );
+  }
+  return sn;
+}
+
+function loadCA(folders: CertFolders, callback: ErrorCallback<CACert>) {
+  async.auto(
+    {
+      certPEM(callback) {
+        FS.readFile(
+          path.join(folders.certsFolder, "ca.pem"),
+          "utf-8",
+          callback
+        );
+      },
+      keyPrivatePEM(callback) {
+        FS.readFile(
+          path.join(folders.keysFolder, "ca.private.key"),
+          "utf-8",
+          callback
+        );
+      },
+      keyPublicPEM(callback) {
+        FS.readFile(
+          path.join(folders.keysFolder, "ca.public.key"),
+          "utf-8",
+          callback
+        );
+      },
+    },
+    (
+      err,
+      results:
+        | { certPEM: string; keyPrivatePEM: string; keyPublicPEM: string }
+        | undefined
+    ) => {
+      if (err) {
+        return callback(err);
+      }
+
+      const cert = pki.certificateFromPem(results!.certPEM);
+      const keys = {
+        privateKey: pki.privateKeyFromPem(results!.keyPrivatePEM),
+        publicKey: pki.publicKeyFromPem(results!.keyPublicPEM),
+      };
+
+      return callback(null, {
+        cert,
+        keys,
+      });
+    }
+  );
+}
+
+function generateCA(folders: CertFolders, callback: ErrorCallback<CACert>) {
+  pki.rsa.generateKeyPair({ bits: 2048 }, (err, keys) => {
+    if (err) {
+      return callback(err);
+    }
+    const cert = pki.createCertificate();
+
+    cert.publicKey = keys.publicKey;
+    cert.serialNumber = randomSerialNumber();
+    cert.validity.notBefore = new Date();
+    cert.validity.notBefore.setDate(cert.validity.notBefore.getDate() - 1);
+    cert.validity.notAfter = new Date();
+    cert.validity.notAfter.setFullYear(
+      cert.validity.notBefore.getFullYear() + 1
+    );
+
+    cert.setSubject(CAattrs);
+    cert.setIssuer(CAattrs);
+    cert.setExtensions(CAextensions);
+    cert.sign(keys.privateKey, md.sha256.create());
+
+    const tasks = [
+      FS.writeFile.bind(
+        null,
+        path.join(folders.certsFolder, "ca.pem"),
+        pki.certificateToPem(cert)
+      ),
+      FS.writeFile.bind(
+        null,
+        path.join(folders.keysFolder, "ca.private.key"),
+        pki.privateKeyToPem(keys.privateKey)
+      ),
+      FS.writeFile.bind(
+        null,
+        path.join(folders.keysFolder, "ca.public.key"),
+        pki.publicKeyToPem(keys.publicKey)
+      ),
+    ];
+
+    async.parallel(tasks, (err) => {
+      if (err) {
+        return callback(err);
+      }
+      return callback(null, { cert, keys });
+    });
+  });
+}
+
+export function getDefaultCA(
+  folders: CertFolders,
+  callback: ErrorCallback<CACert>
+) {
+  const exists = FS.existsSync(path.join(folders.certsFolder, "ca.pem"));
+
+  if (exists) {
+    loadCA(folders, callback);
+  } else {
+    generateCA(folders, callback);
+  }
+}
+
 export class CA {
   baseCAFolder!: string;
   certsFolder!: string;
   keysFolder!: string;
-  CAcert!: ReturnType<typeof Forge.pki.createCertificate>;
-  CAkeys!: ReturnType<typeof Forge.pki.rsa.generateKeyPair>;
 
-  static create(caFolder, callback) {
+  CAcert!: Forge.pki.Certificate;
+  CAkeys!: Forge.pki.rsa.KeyPair;
+
+  static create(folders: CertFolders, cert: CACert) {
     const ca = new CA();
-    ca.baseCAFolder = caFolder;
-    ca.certsFolder = path.join(ca.baseCAFolder, "certs");
-    ca.keysFolder = path.join(ca.baseCAFolder, "keys");
-    mkdirp.sync(ca.baseCAFolder);
-    mkdirp.sync(ca.certsFolder);
-    mkdirp.sync(ca.keysFolder);
-    async.series(
-      [
-        (callback) => {
-          const exists = FS.existsSync(path.join(ca.certsFolder, "ca.pem"));
-          if (exists) {
-            ca.loadCA(callback);
-          } else {
-            ca.generateCA(callback);
-          }
-        },
-      ],
-      (err) => {
-        if (err) {
-          return callback(err);
-        }
-        return callback(null, ca);
-      }
-    );
-  }
 
-  randomSerialNumber() {
-    // generate random 16 bytes hex string
-    let sn = "";
-    for (let i = 0; i < 4; i++) {
-      sn += `00000000${Math.floor(Math.random() * 256 ** 4).toString(
-        16
-      )}`.slice(-8);
-    }
-    return sn;
-  }
+    ca.baseCAFolder = folders.baseFolder;
+    ca.certsFolder = folders.certsFolder;
+    ca.keysFolder = folders.keysFolder;
 
-  getPem() {
-    return pki.certificateToPem(this.CAcert);
-  }
+    ca.CAcert = cert.cert;
+    ca.CAkeys = cert.keys;
 
-  generateCA(
-    callback: (
-      err?: ErrnoException | null | undefined,
-      results?: unknown[] | undefined
-    ) => void
-  ) {
-    const self = this;
-    pki.rsa.generateKeyPair({ bits: 2048 }, (err, keys) => {
-      if (err) {
-        return callback(err);
-      }
-      const cert = pki.createCertificate();
-      cert.publicKey = keys.publicKey;
-      cert.serialNumber = self.randomSerialNumber();
-      cert.validity.notBefore = new Date();
-      cert.validity.notBefore.setDate(cert.validity.notBefore.getDate() - 1);
-      cert.validity.notAfter = new Date();
-      cert.validity.notAfter.setFullYear(
-        cert.validity.notBefore.getFullYear() + 1
-      );
-      cert.setSubject(CAattrs);
-      cert.setIssuer(CAattrs);
-      cert.setExtensions(CAextensions);
-      cert.sign(keys.privateKey, md.sha256.create());
-      self.CAcert = cert;
-      self.CAkeys = keys;
-      const tasks = [
-        FS.writeFile.bind(
-          null,
-          path.join(self.certsFolder, "ca.pem"),
-          pki.certificateToPem(cert)
-        ),
-        FS.writeFile.bind(
-          null,
-          path.join(self.keysFolder, "ca.private.key"),
-          pki.privateKeyToPem(keys.privateKey)
-        ),
-        FS.writeFile.bind(
-          null,
-          path.join(self.keysFolder, "ca.public.key"),
-          pki.publicKeyToPem(keys.publicKey)
-        ),
-      ];
-      async.parallel(tasks, callback);
-    });
-  }
-
-  loadCA(callback: Function) {
-    const self = this;
-    async.auto(
-      {
-        certPEM(callback) {
-          FS.readFile(path.join(self.certsFolder, "ca.pem"), "utf-8", callback);
-        },
-        keyPrivatePEM(callback) {
-          FS.readFile(
-            path.join(self.keysFolder, "ca.private.key"),
-            "utf-8",
-            callback
-          );
-        },
-        keyPublicPEM(callback) {
-          FS.readFile(
-            path.join(self.keysFolder, "ca.public.key"),
-            "utf-8",
-            callback
-          );
-        },
-      },
-      (
-        err,
-        results:
-          | { certPEM: string; keyPrivatePEM: string; keyPublicPEM: string }
-          | undefined
-      ) => {
-        if (err) {
-          return callback(err);
-        }
-        self.CAcert = pki.certificateFromPem(results!.certPEM);
-        self.CAkeys = {
-          privateKey: pki.privateKeyFromPem(results!.keyPrivatePEM),
-          publicKey: pki.publicKeyFromPem(results!.keyPublicPEM),
-        };
-        return callback();
-      }
-    );
+    return ca;
   }
 
   generateServerCertificateKeys(hosts: string | string[], cb) {
@@ -275,7 +294,7 @@ export class CA {
     const keysServer = pki.rsa.generateKeyPair(2048);
     const certServer = pki.createCertificate();
     certServer.publicKey = keysServer.publicKey;
-    certServer.serialNumber = this.randomSerialNumber();
+    certServer.serialNumber = randomSerialNumber();
     certServer.validity.notBefore = new Date();
     certServer.validity.notBefore.setDate(
       certServer.validity.notBefore.getDate() - 1
@@ -346,10 +365,6 @@ export class CA {
     );
     // returns synchronously even before files get written to disk
     cb(certPem, keyPrivatePem);
-  }
-
-  getCACertPath() {
-    return `${this.certsFolder}/ca.pem`;
   }
 }
 

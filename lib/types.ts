@@ -1,9 +1,15 @@
 import http = require("http");
 import https = require("https");
+import type Forge from "node-forge";
 import type CA from "../lib/ca";
 import type WebSocket from "ws";
 import type { Server } from "https";
 import type { WebSocket as WebSocketType, WebSocketServer } from "ws";
+
+export interface CACert {
+  cert: Forge.pki.Certificate;
+  keys: Forge.pki.rsa.KeyPair;
+}
 
 export interface IProxyStatic {
   (): IProxy;
@@ -20,6 +26,8 @@ export interface IProxyOptions {
   host?: string;
   /** - Path to the certificates cache directory (default: process.cwd() + '/.http-mitm-proxy')*/
   sslCaDir?: string;
+  /** - The root certificate used to sign server certificates. If not set, a CA certificate will be generated. */
+  sslCaCert?: CACert;
   /**  - enable HTTP persistent connection*/
   keepAlive?: boolean;
   /**  - The number of milliseconds of inactivity before a socket is presumed to have timed out. Defaults to no timeout. */
@@ -46,7 +54,7 @@ export type ICreateServerCallback = (
   server: Server,
   wssServer: WebSocketServer
 ) => void;
-export type ErrorCallback = (error?: Error | null, data?: any) => void;
+export type ErrorCallback<T = any> = (error?: Error | null, data?: T) => void;
 export type OnRequestParams = (ctx: IContext, callback: ErrorCallback) => void;
 export type OnWebsocketRequestParams = (
   ctx: IWebSocketContext,
@@ -103,7 +111,10 @@ export type OnCertificateRequiredCallback = (
   error: MaybeError,
   certDetails: ICertDetails
 ) => void;
-export type OnRequestDataCallback = (error?: MaybeError, chunk?: Buffer) => void;
+export type OnRequestDataCallback = (
+  error?: MaybeError,
+  chunk?: Buffer
+) => void;
 export type OnRequestDataParams = (
   ctx: IContext,
   chunk: Buffer,
@@ -294,19 +305,19 @@ export type IContext = ICallbacks &
     /** undocumented, allows adjusting the request in callbacks (such as .onRequest()) before sending  upstream (to proxy or target host)..
      * FYI these values seem pre-populated with defaults based on the request, you can modify them to change behavior. */
     proxyToServerRequestOptions:
-    | undefined
-    | {
-      /** ex: "GET" */
-      method: string;
-      /** ex: "/success.txt" */
-      path: string;
+      | undefined
+      | {
+          /** ex: "GET" */
+          method: string;
+          /** ex: "/success.txt" */
+          path: string;
 
-      /** example: "detectportal.firefox.com" */
-      host: string;
-      port: string | number | null | undefined;
-      headers: { [key: string]: string };
-      agent: http.Agent;
-    };
+          /** example: "detectportal.firefox.com" */
+          host: string;
+          port: string | number | null | undefined;
+          headers: { [key: string]: string };
+          agent: http.Agent;
+        };
 
     onRequestHandlers: OnRequestParams[];
     onResponseHandlers: OnRequestParams[];

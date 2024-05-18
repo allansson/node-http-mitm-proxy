@@ -17,7 +17,7 @@ import WebSocket, { WebSocketServer } from "ws";
 
 import url from "url";
 import semaphore from "semaphore";
-import ca from "./ca";
+import ca, { CA, getCertFolders, getDefaultCA } from "./ca";
 import { ProxyFinalResponseFilter } from "./ProxyFinalResponseFilter";
 import { ProxyFinalRequestFilter } from "./ProxyFinalRequestFilter";
 import { v4 as uuid } from "uuid";
@@ -47,6 +47,7 @@ import type {
   OnWebSocketSendParams,
   IWebSocketCallback,
   OnRequestDataCallback,
+  CACert,
 } from "./types";
 import type stream from "node:stream";
 export { wildcard, gunzip };
@@ -137,11 +138,19 @@ export class Proxy implements IProxy {
     this.httpsPort = this.forceSNI ? options.httpsPort : undefined;
     this.sslCaDir =
       options.sslCaDir || path.resolve(process.cwd(), ".http-mitm-proxy");
-    ca.create(this.sslCaDir, (err, ca) => {
+
+    const folders = getCertFolders(this.sslCaDir);
+
+    const initServer: ErrorCallback<CACert> = (err, ca) => {
       if (err) {
         return callback(err);
       }
-      self.ca = ca;
+
+      if (!ca) {
+        return callback(new Error("No CA certificate available."));
+      }
+
+      self.ca = CA.create(folders, ca);
       self.sslServers = {};
       self.sslSemaphores = {};
       self.connectRequests = {};
@@ -183,7 +192,14 @@ export class Proxy implements IProxy {
           callback();
         });
       }
-    });
+    };
+
+    if (options.sslCaCert) {
+      initServer(null, options.sslCaCert);
+    } else {
+      getDefaultCA(folders, initServer);
+    }
+
     return this;
   }
 
@@ -868,7 +884,7 @@ export class Proxy implements IProxy {
     } else {
       url = upgradeReq.url;
     }
-    const proxyToServerHeaders= {};
+    const proxyToServerHeaders = {};
     const clientToProxyHeaders = upgradeReq.headers;
     for (const header in clientToProxyHeaders) {
       if (header.indexOf("sec-websocket") !== 0) {
@@ -877,8 +893,10 @@ export class Proxy implements IProxy {
     }
 
     let protocols: string[] = [];
-    if(clientToProxyHeaders["sec-websocket-protocol"]) {
-      protocols = clientToProxyHeaders["sec-websocket-protocol"].split(",").map((p) => p.trim());
+    if (clientToProxyHeaders["sec-websocket-protocol"]) {
+      protocols = clientToProxyHeaders["sec-websocket-protocol"]
+        .split(",")
+        .map((p) => p.trim());
     }
 
     ctx.proxyToServerWebSocketOptions = {
@@ -1220,7 +1238,7 @@ export class Proxy implements IProxy {
         if (destWebSocket.readyState === WebSocket.OPEN) {
           switch (type) {
             case "message":
-              destWebSocket.send(data, {binary: flags as boolean});
+              destWebSocket.send(data, { binary: flags as boolean });
               break;
             case "ping":
               destWebSocket.ping(data, flags as boolean);
